@@ -1,0 +1,186 @@
+services:
+  # ============================================
+  # Traefik - Reverse Proxy & Load Balancer
+  # ============================================
+  traefik:
+    image: traefik:v3.0
+    container_name: gpu-converter-traefik
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik:/etc/traefik
+    networks:
+      - converter-network
+    restart: unless-stopped
+
+  # ============================================
+  # Redis - Task Queue & Caching
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: gpu-converter-redis
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - converter-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # FastAPI Backend
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gpu-converter-backend
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - UPLOAD_DIR=${UPLOAD_DIR}
+      - OUTPUT_DIR=${OUTPUT_DIR}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE}
+      - ALLOWED_FORMATS=${ALLOWED_FORMATS}
+      - SECRET_KEY=${SECRET_KEY}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS}
+      - DEFAULT_QUALITY=${DEFAULT_QUALITY}
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - converter-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${DOMAIN:-localhost}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.backend.entrypoints=web"
+      - "traefik.http.services.backend.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.backend-strip.stripprefix.prefixes=/api"
+      - "traefik.http.routers.backend.middlewares=backend-strip"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Worker - GPU Processing
+  # ============================================
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gpu-converter-worker
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - UPLOAD_DIR=${UPLOAD_DIR}
+      - OUTPUT_DIR=${OUTPUT_DIR}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - converter-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: celery -A app.worker worker --loglevel=info --concurrency=4
+    restart: unless-stopped
+
+  # ============================================
+  # Celery Beat - Scheduled Tasks
+  # ============================================
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gpu-converter-beat
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - UPLOAD_DIR=${UPLOAD_DIR}
+      - OUTPUT_DIR=${OUTPUT_DIR}
+      - CLEANUP_AFTER_HOURS=${CLEANUP_AFTER_HOURS}
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+    depends_on:
+      - redis
+      - worker
+    networks:
+      - converter-network
+    command: celery -A app.worker beat --loglevel=info
+    restart: unless-stopped
+
+  # ============================================
+  # Next.js Frontend
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: gpu-converter-frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
+      - NODE_ENV=${NODE_ENV}
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    networks:
+      - converter-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+    command: bun run dev
+    restart: unless-stopped
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  converter-network:
+    driver: bridge
+    name: gpu-converter-network
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  redis-data:
+    name: gpu-converter-redis-data
+  uploads:
+    name: gpu-converter-uploads
+  outputs:
+    name: gpu-converter-outputs
