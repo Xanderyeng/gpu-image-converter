@@ -1,32 +1,43 @@
 # ============================================
-# GPU Image Converter - Backend Dockerfile
+# GPU Image Converter - Backend Dockerfile (Ubuntu Base)
+# Alternative for when NVIDIA CUDA images are inaccessible
 # ============================================
-FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04
+FROM ubuntu:22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies including CUDA toolkit
 RUN apt-get update && apt-get install -y \
+    # Python
     python3.11 \
     python3.11-dev \
     python3-pip \
+    python3.11-venv \
+    # Build tools
     build-essential \
     cmake \
     git \
     curl \
     wget \
+    gnupg2 \
+    ca-certificates \
     # Image processing libraries
     libvips-dev \
     libvips-tools \
     imagemagick \
     ffmpeg \
     libopencv-dev \
-    # NVIDIA tools
-    nvidia-cuda-toolkit \
     # Cleanup
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# Install CUDA toolkit from Ubuntu repos (optional - for GPU support)
+# If you have NVIDIA GPU, uncomment these lines:
+# RUN apt-get update && apt-get install -y \
+#     nvidia-cuda-toolkit \
+#     && rm -rf /var/lib/apt/lists/* \
+#     && apt-get clean
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -44,18 +55,17 @@ COPY requirements.txt pyproject.toml ./
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install GPU-accelerated libraries
+# Install GPU-accelerated libraries (will work in CPU mode if no GPU)
 RUN pip3 install --no-cache-dir \
     pyvips \
     opencv-python-headless \
-    pillow-simd \
-    cupy-cuda12x
+    imageio
 
-# Install PyTorch with CUDA support
-RUN pip3 install --no-cache-dir \
-    torch==2.2.0+cu121 \
-    torchvision==0.17.0+cu121 \
-    --extra-index-url https://download.pytorch.org/whl/cu121
+# Optional: Install CuPy only if you have CUDA support
+# RUN pip3 install --no-cache-dir cupy-cuda12x
+
+# Optional: Install PyTorch (CPU version - smaller and faster to build)
+RUN pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Copy application code
 COPY . .
@@ -65,7 +75,6 @@ RUN mkdir -p /app/uploads /app/outputs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV CUDA_VISIBLE_DEVICES=0
 ENV PYTHONPATH=/app
 
 # Expose port
