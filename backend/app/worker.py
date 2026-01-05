@@ -65,12 +65,16 @@ def convert_image_task(
 
         logger.info(f"[{job_id}] Starting conversion: {input_path} -> {output_format}")
 
+        # Remove output_format from options if present (it's passed as a separate arg)
+        options_copy = options.copy()
+        options_copy.pop('output_format', None)
+
         # Perform GPU conversion
         result = converter.convert(
             input_path=input_path,
             output_path=output_path,
             output_format=output_format,
-            **options
+            **options_copy
         )
 
         if not result['success']:
@@ -129,6 +133,10 @@ def batch_convert_task(
 
     logger.info(f"[{job_id}] Starting batch conversion: {total} files")
 
+    # Remove output_format from options if present
+    options_copy = options.copy()
+    options_copy.pop('output_format', None)
+
     for idx, file_path in enumerate(files, 1):
         try:
             output_path = Path(output_dir) / f"{Path(file_path).stem}.{output_format}"
@@ -137,7 +145,7 @@ def batch_convert_task(
                 input_path=file_path,
                 output_path=str(output_path),
                 output_format=output_format,
-                **options
+                **options_copy
             )
 
             results.append(result)

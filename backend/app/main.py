@@ -228,7 +228,20 @@ async def get_job_status(job_id: str):
     if job.status == ConversionStatus.COMPLETED:
         response["completed_at"] = job.completed_at.isoformat() if job.completed_at else None
         response["download_url"] = f"/downloads/{Path(job.output_path).name}"
-        response["metadata"] = job.result
+
+        # Transform snake_case to camelCase for frontend
+        if job.result:
+            response["metadata"] = {
+                "duration": job.result.get("duration"),
+                "inputSize": job.result.get("input_size"),
+                "outputSize": job.result.get("output_size"),
+                "compressionRatio": job.result.get("compression_ratio"),
+                "spaceSaved": job.result.get("space_saved"),
+                "spaceSavedPercent": job.result.get("space_saved_percent"),
+                "originalDimensions": job.result.get("original_dimensions"),
+                "outputDimensions": job.result.get("output_dimensions"),
+                "gpuUsed": job.result.get("gpu_used"),
+            }
     elif job.status == ConversionStatus.FAILED:
         response["error"] = job.error
 

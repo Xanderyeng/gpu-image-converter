@@ -13,14 +13,42 @@ interface JobCardProps {
 }
 
 export function JobCard({ job, onRemove }: JobCardProps) {
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!job.downloadUrl) return;
 
-    const url = `${process.env.NEXT_PUBLIC_API_URL}${job.downloadUrl}`;
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = job.downloadUrl.split('/').pop() || 'download';
-    link.click();
+    try {
+      // Construct download URL - handle both absolute and relative paths
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost/api';
+      const downloadUrl = job.downloadUrl.startsWith('http')
+        ? job.downloadUrl
+        : `${apiUrl}${job.downloadUrl}`;
+
+      // Fetch the file
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        throw new Error(`Download failed: ${response.statusText}`);
+      }
+
+      // Get the blob
+      const blob = await response.blob();
+
+      // Create download link
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = job.downloadUrl.split('/').pop() || `converted-${job.filename}`;
+      document.body.appendChild(link);
+      link.click();
+
+      // Cleanup
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      console.error('Download failed:', error);
+      // Fallback to direct link
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost/api';
+      window.open(`${apiUrl}${job.downloadUrl}`, '_blank');
+    }
   };
 
   return (
@@ -72,16 +100,28 @@ export function JobCard({ job, onRemove }: JobCardProps) {
 
             {job.metadata && (
               <>
-                <span>•</span>
-                <span>{job.metadata.duration.toFixed(2)}s</span>
-                <span>•</span>
-                <span>
-                  {(job.metadata.outputSize / 1024 / 1024).toFixed(2)} MB
-                </span>
-                <span>•</span>
-                <span className="text-green-600 font-medium">
-                  {job.metadata.spaceSavedPercent.toFixed(0)}% smaller
-                </span>
+                {job.metadata.duration != null && (
+                  <>
+                    <span>•</span>
+                    <span>{job.metadata.duration.toFixed(2)}s</span>
+                  </>
+                )}
+                {job.metadata.outputSize != null && (
+                  <>
+                    <span>•</span>
+                    <span>
+                      {(job.metadata.outputSize / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                  </>
+                )}
+                {job.metadata.spaceSavedPercent != null && (
+                  <>
+                    <span>•</span>
+                    <span className="text-green-600 font-medium">
+                      {job.metadata.spaceSavedPercent.toFixed(0)}% smaller
+                    </span>
+                  </>
+                )}
                 {job.metadata.gpuUsed && (
                   <>
                     <span>•</span>

@@ -1,6 +1,8 @@
 import pyvips
 import cv2
 import numpy as np
+import torch
+import torch.nn.functional as F
 from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
@@ -66,14 +68,20 @@ class GPUImageConverter:
         # Try to set concurrency (number of worker threads)
         _safe_pyvips_call("concurrency_set", 4)  # Utilize 4 CPU cores
 
-        # Test CUDA availability
+        # Test CUDA availability using PyTorch
         try:
-            self.cuda_available = cv2.cuda.getCudaEnabledDeviceCount() > 0
+            self.cuda_available = torch.cuda.is_available()
             if self.cuda_available:
-                logger.info(f"CUDA devices available: {cv2.cuda.getCudaEnabledDeviceCount()}")
+                self.device = torch.device('cuda:0')
+                device_name = torch.cuda.get_device_name(0)
+                logger.info(f"CUDA available: {device_name}")
+            else:
+                self.device = torch.device('cpu')
+                logger.info("CUDA not available, using CPU")
         except Exception as e:
             logger.warning(f"CUDA check failed: {e}")
             self.cuda_available = False
+            self.device = torch.device('cpu')
 
         logger.info(f"GPU Image Converter initialized (CUDA: {self.cuda_available})")
 
@@ -240,7 +248,7 @@ class GPUImageConverter:
         options: Dict
     ) -> pyvips.Image:
         """
-        Apply GPU-accelerated filters using OpenCV CUDA.
+        Apply GPU-accelerated filters using PyTorch.
 
         Args:
             image: Source vips image
@@ -261,30 +269,36 @@ class GPUImageConverter:
                 shape=[image.height, image.width, image.bands]
             )
 
-            # Upload to GPU
-            gpu_image = cv2.cuda_GpuMat()
-            gpu_image.upload(np_array)
+            # Convert to PyTorch tensor and move to GPU
+            # Shape: [H, W, C] -> [1, C, H, W] for PyTorch
+            tensor = torch.from_numpy(np_array).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            tensor = tensor.to(self.device)
 
             # Apply sharpening filter on GPU
             if options.get('sharpen'):
-                kernel = np.array([
-                    [-1, -1, -1],
-                    [-1,  9, -1],
-                    [-1, -1, -1]
-                ], dtype=np.float32)
+                # Sharpen kernel
+                kernel = torch.tensor([
+                    [[-1, -1, -1],
+                     [-1,  9, -1],
+                     [-1, -1, -1]]
+                ], dtype=torch.float32).unsqueeze(0).to(self.device)
 
-                gpu_filter = cv2.cuda.createLinearFilter(
-                    cv2.CV_8UC3, cv2.CV_8UC3, kernel
-                )
-                gpu_image = gpu_filter.apply(gpu_image)
+                # Apply convolution to each channel
+                channels = []
+                for i in range(tensor.shape[1]):
+                    channel = tensor[:, i:i+1, :, :]
+                    sharpened = F.conv2d(channel, kernel, padding=1)
+                    channels.append(sharpened)
+                tensor = torch.cat(channels, dim=1)
+                tensor = torch.clamp(tensor, 0, 1)
 
-            # Apply denoising on GPU
+            # Apply denoising on GPU (simple bilateral-like filter)
             if options.get('denoise'):
-                denoiser = cv2.cuda.createFastNlMeansDenoisingColored()
-                gpu_image = denoiser.apply(gpu_image)
+                # Use average pooling as a simple denoise
+                tensor = F.avg_pool2d(tensor, kernel_size=3, stride=1, padding=1)
 
-            # Download from GPU
-            result = gpu_image.download()
+            # Convert back to numpy
+            result = (tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 
             # Convert back to vips image
             return pyvips.Image.new_from_memory(
